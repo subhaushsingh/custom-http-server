@@ -679,3 +679,181 @@ function wsFrame(opcode: number, payload: Buffer, fin = true): Buffer {
 
     return Buffer.concat([head, payload]);
 }
+
+
+async function createWSServer(input: BodyReader): Promise<[WSServer, BodyReader]> {
+    const incoming = createQueue<WSMsg>(1);
+    const outgoing = createQueue<Buffer>(4);
+    let closed = false;
+
+    const ibuf: DynBuf = { data: Buffer.alloc(0), length: 0 };
+
+    async function ensure(n: number): Promise<boolean> {
+        while (ibuf.length < n) {
+            const d = await input.read();
+            if (d.length === 0) return false;
+            bufPush(ibuf, d);
+        }
+        return true;
+    }
+
+    async function take(n: number): Promise<Buffer> {
+        if (!(await ensure(n))) throw new Error("unexpected WebSocket EOF");
+        const out = Buffer.from(ibuf.data.subarray(0, n));
+        bufPop(ibuf, n);
+        return out;
+    }
+
+    async function protocolReader(): Promise<void> {
+        let fragmentedType: number | null = null;
+        let fragments: Buffer[] = [];
+        let fragmentBytes = 0;
+
+        try {
+            while (!closed) {
+                if (!(await ensure(2))) break;
+                const h = await take(2);
+                const fin = !!(h[0]! & 0x80);
+                const rsv = h[0]! & 0x70;
+                const opcode = h[0]! & 0x0f;
+                const masked = !!(h[1]! & 0x80);
+                let len = h[1]! & 0x7f;
+
+                if (rsv !== 0) throw new Error("unsupported WebSocket extension");
+                if (!masked) throw new Error("client WebSocket frames must be masked");
+
+                if (len === 126) {
+                    len = (await take(2)).readUInt16BE(0);
+                } else if (len === 127) {
+                    const big = (await take(8)).readBigUInt64BE(0);
+                    if (big > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error("frame too large");
+                    len = Number(big);
+                }
+
+                const control = opcode >= 0x8;
+                if (control && (!fin || len > 125)) throw new Error("invalid control frame");
+                if (len > 16 * 1024 * 1024) throw new Error("WebSocket frame too large");
+
+                const mask = await take(4);
+                const payload = await take(len);
+                for (let i = 0; i < payload.length; i++) {
+                    payload[i] = payload[i]! ^ mask[i & 3]!;
+                }
+
+                if (opcode === 0x8) {
+                    await outgoing.pushBack(wsFrame(0x8, payload.subarray(0, 125)));
+                    break;
+                }
+
+                if (opcode === 0x9) {
+                    await outgoing.pushBack(wsFrame(0xA, payload));
+                    continue;
+                }
+
+                if (opcode === 0xA) continue;
+
+                if (opcode === WS_DATA_TEXT || opcode === WS_DATA_BINARY) {
+                    if (fragmentedType !== null) throw new Error("unexpected new data frame");
+
+                    if (fin) {
+                        let done = false;
+                        const copy = Buffer.from(payload);
+                        await incoming.pushBack({
+                            type: opcode,
+                            length: copy.length,
+                            read: async () => {
+                                if (done) return Buffer.alloc(0);
+                                done = true;
+                                return copy;
+                            },
+                        });
+                    } else {
+                        fragmentedType = opcode;
+                        fragments = [Buffer.from(payload)];
+                        fragmentBytes = payload.length;
+                    }
+                    continue;
+                }
+
+                if (opcode === 0x0) {
+                    if (fragmentedType === null) throw new Error("unexpected continuation frame");
+                    fragments.push(Buffer.from(payload));
+                    fragmentBytes += payload.length;
+                    if (fragmentBytes > 32 * 1024 * 1024) throw new Error("message too large");
+
+                    if (fin) {
+                        const message = Buffer.concat(fragments, fragmentBytes);
+                        const type = fragmentedType;
+                        fragmentedType = null;
+                        fragments = [];
+                        fragmentBytes = 0;
+
+                        let done = false;
+                        await incoming.pushBack({
+                            type,
+                            length: message.length,
+                            read: async () => {
+                                if (done) return Buffer.alloc(0);
+                                done = true;
+                                return message;
+                            },
+                        });
+                    }
+                    continue;
+                }
+
+                throw new Error("unsupported WebSocket opcode");
+            }
+        } finally {
+            incoming.close();
+            outgoing.close();
+        }
+    }
+
+    protocolReader().catch(err => {
+        console.error("WebSocket protocol error:", err);
+        incoming.close();
+        outgoing.close();
+    });
+
+    const ws: WSServer = {
+        async send(msg: WSMsg): Promise<void> {
+            if (closed) throw new Error("WebSocket closed");
+            if (msg.type !== WS_DATA_TEXT && msg.type !== WS_DATA_BINARY) {
+                throw new Error("bad WebSocket message type");
+            }
+
+            const payload = await readAll({
+                length: msg.length,
+                read: msg.read,
+            }, 32 * 1024 * 1024);
+
+            await outgoing.pushBack(wsFrame(msg.type, payload));
+        },
+
+        recv(): Promise<WSMsg | null> {
+            return incoming.popFront();
+        },
+
+        close(): void {
+            if (closed) return;
+            closed = true;
+            incoming.close();
+            outgoing.close();
+        },
+    };
+
+    const responseBody: BodyReader = {
+        length: -1,
+        read: async () => {
+            const frame = await outgoing.popFront();
+            return frame ?? Buffer.alloc(0);
+        },
+        close: async () => {
+            ws.close();
+            await input.close?.();
+        },
+    };
+
+    return [ws, responseBody];
+}
