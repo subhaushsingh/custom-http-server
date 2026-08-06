@@ -65,6 +65,8 @@ class HTTPError extends Error {
     }
 }
 
+/* ----------------------------- Dynamic buffer ----------------------------- */
+
 function bufPush(buf: DynBuf, data: Buffer): void {
     const newLen = buf.length + data.length;
     if (buf.data.length < newLen) {
@@ -83,6 +85,8 @@ function bufPop(buf: DynBuf, len: number): void {
     buf.data.copyWithin(0, len, buf.length);
     buf.length -= len;
 }
+
+/* ------------------------------- TCP layer -------------------------------- */
 
 function soInit(socket: net.Socket): TCPConn {
     const conn: TCPConn = { socket, err: null, ended: false, reader: null };
@@ -139,6 +143,8 @@ async function soWrite(conn: TCPConn, data: Buffer): Promise<void> {
     const ok = conn.socket.write(data);
     if (!ok) await once(conn.socket, "drain");
 }
+    
+/* ------------------------------ HTTP parsing ------------------------------ */
 
 function splitLines(data: Buffer): Buffer[] {
     const out: Buffer[] = [];
@@ -240,6 +246,8 @@ function hasToken(headers: Buffer[], name: string, token: string): boolean {
     );
 }
 
+/* ------------------------------ Body readers ------------------------------ */
+
 function readerFromMemory(data: Buffer): BodyReader {
     let done = false;
     return {
@@ -288,7 +296,6 @@ function readerFromConnLength(conn: TCPConn, buf: DynBuf, length: number): BodyR
     };
 }
 
-
 function readerFromConnEOF(conn: TCPConn, buf: DynBuf): BodyReader {
     return {
         length: -1,
@@ -302,7 +309,6 @@ function readerFromConnEOF(conn: TCPConn, buf: DynBuf): BodyReader {
         },
     };
 }
-
 
 function readerFromChunked(conn: TCPConn, buf: DynBuf): BodyReader {
     let remain = 0;
@@ -398,6 +404,8 @@ function readerFromReq(conn: TCPConn, buf: DynBuf, req: HTTPReq): BodyReader {
     return readerFromMemory(Buffer.alloc(0));
 }
 
+/* ----------------------------- HTTP responses ----------------------------- */
+
 const STATUS: Record<number, string> = {
     101: "Switching Protocols",
     200: "OK",
@@ -472,6 +480,7 @@ async function writeHTTPBody(conn: TCPConn, body: BodyReader, raw = false): Prom
     }
 }
 
+/* ------------------------------- Compression ------------------------------ */
 
 async function readAll(reader: BodyReader, limit = 32 * 1024 * 1024): Promise<Buffer> {
     const parts: Buffer[] = [];
@@ -547,6 +556,8 @@ function enableCompression(req: HTTPReq, res: HTTPRes): void {
     res.body = gzipFilter(res.body);
 }
 
+/* ------------------------------- File server ------------------------------ */
+
 function parseSingleRange(value: string, size: number): [number, number] | null {
     const m = /^bytes=(\d*)-(\d*)$/.exec(value.trim());
     if (!m) return null;
@@ -571,7 +582,6 @@ function parseSingleRange(value: string, size: number): [number, number] | null 
 
     return [start, end];
 }
-
 
 function fileReader(handle: fs.FileHandle, start: number, length: number): BodyReader {
     let pos = start;
@@ -598,7 +608,6 @@ function fileReader(handle: fs.FileHandle, start: number, length: number): BodyR
     };
 }
 
-
 function mimeType(p: string): string {
     const ext = path.extname(p).toLowerCase();
     return ({
@@ -615,6 +624,252 @@ function mimeType(p: string): string {
         ".pdf": "application/pdf",
     } as Record<string, string>)[ext] ?? "application/octet-stream";
 }
+
+async function serveStatic(req: HTTPReq, urlPath: string): Promise<HTTPRes> {
+    const root = path.resolve(process.cwd(), "www");
+    let decoded: string;
+    try {
+        decoded = decodeURIComponent(urlPath);
+    } catch {
+        throw new HTTPError(400, "bad URI");
+    }
+
+    if (decoded === "/") decoded = "/index.html";
+    const rel = decoded.replace(/^\/+/, "");
+    const full = path.resolve(root, rel);
+
+    if (full !== root && !full.startsWith(root + path.sep)) {
+        throw new HTTPError(403, "forbidden");
+    }
+
+    let handle: fs.FileHandle;
+    try {
+        handle = await fs.open(full, "r");
+    } catch {
+        throw new HTTPError(404, "not found");
+    }
+
+    try {
+        const st = await handle.stat();
+        if (!st.isFile()) throw new HTTPError(404, "not found");
+
+        const mtimeSec = Math.floor(st.mtimeMs / 1000) * 1000;
+        const lastModified = new Date(mtimeSec).toUTCString();
+
+        const ims = fieldGet(req.headers, "If-Modified-Since");
+        if (ims) {
+            const t = Date.parse(ims.toString("latin1"));
+            if (!Number.isNaN(t) && mtimeSec <= t) {
+                await handle.close();
+                return {
+                    code: 304,
+                    headers: [Buffer.from(`Last-Modified: ${lastModified}`)],
+                    body: readerFromMemory(Buffer.alloc(0)),
+                };
+            }
+        }
+
+        const headers = [
+            Buffer.from(`Content-Type: ${mimeType(full)}`),
+            Buffer.from("Accept-Ranges: bytes"),
+            Buffer.from(`Last-Modified: ${lastModified}`),
+        ];
+
+        const rangeHeader = fieldGet(req.headers, "Range");
+        if (rangeHeader) {
+            const ifRange = fieldGet(req.headers, "If-Range");
+            const mayRange = !ifRange || ifRange.toString("latin1") === lastModified;
+
+            if (mayRange) {
+                const range = parseSingleRange(rangeHeader.toString("latin1"), st.size);
+                if (!range) {
+                    await handle.close();
+                    return {
+                        code: 416,
+                        headers: [Buffer.from(`Content-Range: bytes */${st.size}`)],
+                        body: readerFromMemory(Buffer.alloc(0)),
+                    };
+                }
+                const [start, end] = range;
+                headers.push(Buffer.from(`Content-Range: bytes ${start}-${end}/${st.size}`));
+                return {
+                    code: 206,
+                    headers,
+                    body: fileReader(handle, start, end - start + 1),
+                };
+            }
+        }
+
+        return {
+            code: 200,
+            headers,
+            body: fileReader(handle, 0, st.size),
+        };
+    } catch (e) {
+        try { await handle.close(); } catch { }
+        throw e;
+    }
+}
+
+/* ------------------------------ HTTP handler ------------------------------ */
+
+async function* sheepGenerator(): AsyncGenerator<Buffer, void, void> {
+    for (let i = 0; i < 100; i++) {
+        yield Buffer.from(`${i} sheep...\n`);
+        await new Promise(resolve => setTimeout(resolve, 50));
+    }
+}
+
+async function handleReq(req: HTTPReq, body: BodyReader): Promise<HTTPRes> {
+    if (!["GET", "HEAD", "POST"].includes(req.method)) {
+        return {
+            code: 405,
+            headers: [Buffer.from("Allow: GET, HEAD, POST")],
+            body: readerFromMemory(Buffer.from("Method Not Allowed\n")),
+        };
+    }
+
+    const rawUri = req.uri.toString("latin1");
+    let url: URL;
+    try {
+        url = new URL(rawUri, "http://localhost");
+    } catch {
+        throw new HTTPError(400, "bad URI");
+    }
+
+    if (url.pathname === "/echo") {
+        return {
+            code: 200,
+            headers: [Buffer.from("Content-Type: application/octet-stream")],
+            body,
+        };
+    }
+
+    if (url.pathname === "/sheep") {
+        return {
+            code: 200,
+            headers: [Buffer.from("Content-Type: text/plain; charset=utf-8")],
+            body: readerFromGenerator(sheepGenerator()),
+        };
+    }
+
+    if (url.pathname === "/") {
+        const hello = Buffer.from(
+            "Hello from your web server built from scratch.\n" +
+            "Try /echo, /sheep, /files/<name>, or WebSocket /ws.\n"
+        );
+        return {
+            code: 200,
+            headers: [Buffer.from("Content-Type: text/plain; charset=utf-8")],
+            body: readerFromMemory(hello),
+        };
+    }
+
+    if (url.pathname.startsWith("/files/")) {
+        return await serveStatic(req, url.pathname.substring("/files".length));
+    }
+
+    return {
+        code: 404,
+        headers: [Buffer.from("Content-Type: text/plain; charset=utf-8")],
+        body: readerFromMemory(Buffer.from("Not Found\n")),
+    };
+}
+
+/* ---------------------------- Blocking queue ------------------------------ */
+
+type Producer<T> = {
+    item: T;
+    resolve: () => void;
+    reject: (e: Error) => void;
+};
+
+type Queue<T> = {
+    pushBack(item: T): Promise<void>;
+    popFront(): Promise<T | null>;
+    close(): void;
+};
+
+function createQueue<T>(capacity = 1): Queue<T> {
+    const items: T[] = [];
+    const producers: Producer<T>[] = [];
+    const consumers: Array<(item: T | null) => void> = [];
+    let closed = false;
+
+    function flush(): void {
+        while (consumers.length && items.length) {
+            consumers.shift()!(items.shift()!);
+        }
+
+        while (!closed && producers.length && items.length < capacity) {
+            const p = producers.shift()!;
+            if (consumers.length) {
+                consumers.shift()!(p.item);
+            } else {
+                items.push(p.item);
+            }
+            p.resolve();
+        }
+
+        if (closed) {
+            while (consumers.length) {
+                if (items.length) consumers.shift()!(items.shift()!);
+                else consumers.shift()!(null);
+            }
+            while (producers.length) {
+                producers.shift()!.reject(new Error("queue closed"));
+            }
+        }
+    }
+
+    return {
+        pushBack(item: T): Promise<void> {
+            if (closed) return Promise.reject(new Error("queue closed"));
+
+            if (consumers.length) {
+                consumers.shift()!(item);
+                return Promise.resolve();
+            }
+
+            if (items.length < capacity) {
+                items.push(item);
+                return Promise.resolve();
+            }
+
+            return new Promise((resolve, reject) => {
+                producers.push({ item, resolve, reject });
+            });
+        },
+
+        popFront(): Promise<T | null> {
+            if (items.length) {
+                const item = items.shift()!;
+                flush();
+                return Promise.resolve(item);
+            }
+
+            if (producers.length) {
+                const p = producers.shift()!;
+                p.resolve();
+                return Promise.resolve(p.item);
+            }
+
+            if (closed) return Promise.resolve(null);
+
+            return new Promise(resolve => {
+                consumers.push(resolve);
+            });
+        },
+
+        close(): void {
+            if (closed) return;
+            closed = true;
+            flush();
+        },
+    };
+}
+
+/* ------------------------------ WebSockets -------------------------------- */
 
 function wsKeyAccept(key: Buffer): string {
     return crypto
@@ -679,7 +934,6 @@ function wsFrame(opcode: number, payload: Buffer, fin = true): Buffer {
 
     return Buffer.concat([head, payload]);
 }
-
 
 async function createWSServer(input: BodyReader): Promise<[WSServer, BodyReader]> {
     const incoming = createQueue<WSMsg>(1);
@@ -857,7 +1111,6 @@ async function createWSServer(input: BodyReader): Promise<[WSServer, BodyReader]
 
     return [ws, responseBody];
 }
-
 
 async function handleWS(
     req: HTTPReq,
