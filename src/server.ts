@@ -239,3 +239,28 @@ function hasToken(headers: Buffer[], name: string, token: string): boolean {
         x => x.split(";")[0]!.trim() === token.toLowerCase()
     );
 }
+
+function readerFromMemory(data: Buffer): BodyReader {
+    let done = false;
+    return {
+        length: data.length,
+        read: async () => {
+            if (done) return Buffer.alloc(0);
+            done = true;
+            return data;
+        },
+    };
+}
+
+function readerFromGenerator(gen: AsyncGenerator<Buffer, void, void>): BodyReader {
+    return {
+        length: -1,
+        read: async () => {
+            const r = await gen.next();
+            return r.done ? Buffer.alloc(0) : r.value;
+        },
+        close: async () => {
+            await gen.return(undefined);
+        },
+    };
+}
