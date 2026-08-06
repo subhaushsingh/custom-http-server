@@ -39,3 +39,28 @@ type HTTPRes = {
     headers: Buffer[];
     body: BodyReader;
 };
+
+const WS_DATA_TEXT = 0x01;
+const WS_DATA_BINARY = 0x02;
+
+type WSMsg = {
+    type: number;
+    length: number;
+    read: () => Promise<Buffer>;
+};
+
+type WSServer = {
+    send: (msg: WSMsg) => Promise<void>;
+    recv: () => Promise<WSMsg | null>;
+    close: () => void;
+};
+
+type WSApplication = (ws: WSServer) => Promise<void>;
+
+class HTTPError extends Error {
+    code: number;
+    constructor(code: number, message: string) {
+        super(message);
+        this.code = code;
+    }
+}
