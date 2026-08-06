@@ -531,3 +531,18 @@ function gzipFilter(source: BodyReader): BodyReader {
         },
     };
 }
+
+function enableCompression(req: HTTPReq, res: HTTPRes): void {
+    res.headers.push(Buffer.from("Vary: Accept-Encoding"));
+
+    if (fieldGet(req.headers, "Range")) return;
+    if (!hasToken(req.headers, "Accept-Encoding", "gzip")) return;
+    if (res.code === 101 || res.code === 206 || res.code === 304) return;
+
+    res.headers = res.headers.filter(h => {
+        const idx = h.indexOf(":");
+        return idx < 0 || h.subarray(0, idx).toString("latin1").toLowerCase() !== "content-length";
+    });
+    res.headers.push(Buffer.from("Content-Encoding: gzip"));
+    res.body = gzipFilter(res.body);
+}
