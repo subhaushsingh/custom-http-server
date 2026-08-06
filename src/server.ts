@@ -139,3 +139,31 @@ async function soWrite(conn: TCPConn, data: Buffer): Promise<void> {
     const ok = conn.socket.write(data);
     if (!ok) await once(conn.socket, "drain");
 }
+
+function splitLines(data: Buffer): Buffer[] {
+    const out: Buffer[] = [];
+    let start = 0;
+    while (true) {
+        const idx = data.indexOf("\r\n", start, "latin1");
+        if (idx < 0) break;
+        out.push(data.subarray(start, idx));
+        start = idx + 2;
+    }
+    if (start !== data.length) throw new HTTPError(400, "bad HTTP header");
+    return out;
+}
+
+function validateToken(s: string): boolean {
+    return /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/.test(s);
+}
+
+function parseRequestLine(line: Buffer): [string, Buffer, string] {
+    const text = line.toString("latin1");
+    const m = /^([!#$%&'*+\-.^_`|~0-9A-Za-z]+) ([^ ]+) HTTP\/(1\.[01])$/.exec(text);
+    if (!m) throw new HTTPError(400, "bad request line");
+    const method = m[1]!;
+    const uri = m[2]!;
+    const version = m[3]!;
+
+    return [method, Buffer.from(uri, "latin1"), version];
+}
