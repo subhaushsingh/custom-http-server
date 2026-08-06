@@ -546,3 +546,54 @@ function enableCompression(req: HTTPReq, res: HTTPRes): void {
     res.headers.push(Buffer.from("Content-Encoding: gzip"));
     res.body = gzipFilter(res.body);
 }
+
+function parseSingleRange(value: string, size: number): [number, number] | null {
+    const m = /^bytes=(\d*)-(\d*)$/.exec(value.trim());
+    if (!m) return null;
+
+    if (m[1] === "" && m[2] === "") return null;
+
+    let start: number;
+    let end: number;
+
+    if (m[1] === "") {
+        const suffix = Number(m[2]);
+        if (!Number.isSafeInteger(suffix) || suffix <= 0) return null;
+        start = Math.max(0, size - suffix);
+        end = size - 1;
+    } else {
+        start = Number(m[1]);
+        if (!Number.isSafeInteger(start) || start >= size) return null;
+        end = m[2] === "" ? size - 1 : Number(m[2]);
+        if (!Number.isSafeInteger(end) || end < start) return null;
+        end = Math.min(end, size - 1);
+    }
+
+    return [start, end];
+}
+
+
+function fileReader(handle: fs.FileHandle, start: number, length: number): BodyReader {
+    let pos = start;
+    let remain = length;
+    let closed = false;
+
+    return {
+        length,
+        read: async () => {
+            if (remain <= 0) return Buffer.alloc(0);
+            const buf = Buffer.allocUnsafe(Math.min(64 * 1024, remain));
+            const r = await handle.read(buf, 0, buf.length, pos);
+            if (r.bytesRead === 0) return Buffer.alloc(0);
+            pos += r.bytesRead;
+            remain -= r.bytesRead;
+            return buf.subarray(0, r.bytesRead);
+        },
+        close: async () => {
+            if (!closed) {
+                closed = true;
+                await handle.close();
+            }
+        },
+    };
+}
