@@ -65,7 +65,6 @@ class HTTPError extends Error {
     }
 }
 
-/* ----------------------------- Dynamic buffer ----------------------------- */
 
 function bufPush(buf: DynBuf, data: Buffer): void {
     const newLen = buf.length + data.length;
@@ -86,7 +85,6 @@ function bufPop(buf: DynBuf, len: number): void {
     buf.length -= len;
 }
 
-/* ------------------------------- TCP layer -------------------------------- */
 
 function soInit(socket: net.Socket): TCPConn {
     const conn: TCPConn = { socket, err: null, ended: false, reader: null };
@@ -143,8 +141,7 @@ async function soWrite(conn: TCPConn, data: Buffer): Promise<void> {
     const ok = conn.socket.write(data);
     if (!ok) await once(conn.socket, "drain");
 }
-    
-/* ------------------------------ HTTP parsing ------------------------------ */
+
 
 function splitLines(data: Buffer): Buffer[] {
     const out: Buffer[] = [];
@@ -246,7 +243,6 @@ function hasToken(headers: Buffer[], name: string, token: string): boolean {
     );
 }
 
-/* ------------------------------ Body readers ------------------------------ */
 
 function readerFromMemory(data: Buffer): BodyReader {
     let done = false;
@@ -404,7 +400,6 @@ function readerFromReq(conn: TCPConn, buf: DynBuf, req: HTTPReq): BodyReader {
     return readerFromMemory(Buffer.alloc(0));
 }
 
-/* ----------------------------- HTTP responses ----------------------------- */
 
 const STATUS: Record<number, string> = {
     101: "Switching Protocols",
@@ -480,7 +475,6 @@ async function writeHTTPBody(conn: TCPConn, body: BodyReader, raw = false): Prom
     }
 }
 
-/* ------------------------------- Compression ------------------------------ */
 
 async function readAll(reader: BodyReader, limit = 32 * 1024 * 1024): Promise<Buffer> {
     const parts: Buffer[] = [];
@@ -555,8 +549,6 @@ function enableCompression(req: HTTPReq, res: HTTPRes): void {
     res.headers.push(Buffer.from("Content-Encoding: gzip"));
     res.body = gzipFilter(res.body);
 }
-
-/* ------------------------------- File server ------------------------------ */
 
 function parseSingleRange(value: string, size: number): [number, number] | null {
     const m = /^bytes=(\d*)-(\d*)$/.exec(value.trim());
@@ -711,8 +703,6 @@ async function serveStatic(req: HTTPReq, urlPath: string): Promise<HTTPRes> {
     }
 }
 
-/* ------------------------------ HTTP handler ------------------------------ */
-
 async function* sheepGenerator(): AsyncGenerator<Buffer, void, void> {
     for (let i = 0; i < 100; i++) {
         yield Buffer.from(`${i} sheep...\n`);
@@ -776,7 +766,6 @@ async function handleReq(req: HTTPReq, body: BodyReader): Promise<HTTPRes> {
     };
 }
 
-/* ---------------------------- Blocking queue ------------------------------ */
 
 type Producer<T> = {
     item: T;
@@ -869,7 +858,6 @@ function createQueue<T>(capacity = 1): Queue<T> {
     };
 }
 
-/* ------------------------------ WebSockets -------------------------------- */
 
 function wsKeyAccept(key: Buffer): string {
     return crypto
@@ -1137,7 +1125,6 @@ async function handleWS(
     };
 }
 
-/* ------------------------------- Main loop -------------------------------- */
 
 function errorResponse(err: unknown): HTTPRes {
     const code = err instanceof HTTPError ? err.code : 500;
