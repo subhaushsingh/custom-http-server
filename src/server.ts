@@ -264,3 +264,26 @@ function readerFromGenerator(gen: AsyncGenerator<Buffer, void, void>): BodyReade
         },
     };
 }
+
+function readerFromConnLength(conn: TCPConn, buf: DynBuf, length: number): BodyReader {
+    let remain = length;
+
+    return {
+        length,
+        read: async () => {
+            if (remain === 0) return Buffer.alloc(0);
+
+            if (buf.length === 0) {
+                const data = await soRead(conn);
+                if (data.length === 0) throw new HTTPError(400, "unexpected EOF");
+                bufPush(buf, data);
+            }
+
+            const n = Math.min(buf.length, remain, 64 * 1024);
+            const data = Buffer.from(buf.data.subarray(0, n));
+            bufPop(buf, n);
+            remain -= n;
+            return data;
+        },
+    };
+}
