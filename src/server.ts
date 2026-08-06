@@ -83,3 +83,59 @@ function bufPop(buf: DynBuf, len: number): void {
     buf.data.copyWithin(0, len, buf.length);
     buf.length -= len;
 }
+
+function soInit(socket: net.Socket): TCPConn {
+    const conn: TCPConn = { socket, err: null, ended: false, reader: null };
+
+    socket.on("data", (data: Buffer) => {
+        socket.pause();
+        const reader = conn.reader;
+        if (!reader) {
+            conn.err = new Error("unexpected socket data without active reader");
+            socket.destroy(conn.err);
+            return;
+        }
+        conn.reader = null;
+        reader.resolve(data);
+    });
+
+    socket.on("end", () => {
+        conn.ended = true;
+        if (conn.reader) {
+            const reader = conn.reader;
+            conn.reader = null;
+            reader.resolve(Buffer.alloc(0));
+        }
+    });
+
+    socket.on("error", (err: Error) => {
+        conn.err = err;
+        if (conn.reader) {
+            const reader = conn.reader;
+            conn.reader = null;
+            reader.reject(err);
+        }
+    });
+
+    return conn;
+}
+
+function soRead(conn: TCPConn): Promise<Buffer> {
+    if (conn.reader) return Promise.reject(new Error("concurrent socket reads"));
+    if (conn.err) return Promise.reject(conn.err);
+    if (conn.ended) return Promise.resolve(Buffer.alloc(0));
+
+    return new Promise((resolve, reject) => {
+        conn.reader = { resolve, reject };
+        conn.socket.resume();
+    });
+}
+
+async function soWrite(conn: TCPConn, data: Buffer): Promise<void> {
+    if (data.length === 0) return;
+    if (conn.err) throw conn.err;
+    if (conn.socket.destroyed) throw new Error("socket closed");
+
+    const ok = conn.socket.write(data);
+    if (!ok) await once(conn.socket, "drain");
+}
