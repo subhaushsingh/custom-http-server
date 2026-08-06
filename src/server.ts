@@ -372,3 +372,28 @@ function readerFromChunked(conn: TCPConn, buf: DynBuf): BodyReader {
         },
     };
 }
+
+function readerFromReq(conn: TCPConn, buf: DynBuf, req: HTTPReq): BodyReader {
+    const te = fieldGet(req.headers, "Transfer-Encoding");
+    const cl = fieldGet(req.headers, "Content-Length");
+
+    if (te && cl) throw new HTTPError(400, "ambiguous body length");
+
+    if (te) {
+        const values = fieldGetList(req.headers, "Transfer-Encoding");
+        if (values.length !== 1 || values[0] !== "chunked") {
+            throw new HTTPError(501, "unsupported transfer encoding");
+        }
+        return readerFromChunked(conn, buf);
+    }
+
+    if (cl) {
+        const text = cl.toString("latin1");
+        if (!/^\d+$/.test(text)) throw new HTTPError(400, "bad content-length");
+        const n = Number(text);
+        if (!Number.isSafeInteger(n)) throw new HTTPError(400, "content-length too large");
+        return readerFromConnLength(conn, buf, n);
+    }
+
+    return readerFromMemory(Buffer.alloc(0));
+}
