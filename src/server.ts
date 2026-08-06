@@ -302,3 +302,73 @@ function readerFromConnEOF(conn: TCPConn, buf: DynBuf): BodyReader {
         },
     };
 }
+
+
+function readerFromChunked(conn: TCPConn, buf: DynBuf): BodyReader {
+    let remain = 0;
+    let ended = false;
+    let needCRLF = false;
+
+    async function fill(): Promise<boolean> {
+        const d = await soRead(conn);
+        if (d.length === 0) return false;
+        bufPush(buf, d);
+        return true;
+    }
+
+    async function readLine(): Promise<Buffer> {
+        while (true) {
+            const idx = buf.data.subarray(0, buf.length).indexOf("\r\n");
+            if (idx >= 0) {
+                const line = Buffer.from(buf.data.subarray(0, idx));
+                bufPop(buf, idx + 2);
+                return line;
+            }
+            if (buf.length > 8192) throw new HTTPError(400, "chunk line too long");
+            if (!(await fill())) throw new HTTPError(400, "unexpected EOF in chunked body");
+        }
+    }
+
+    return {
+        length: -1,
+        read: async () => {
+            if (ended) return Buffer.alloc(0);
+
+            if (needCRLF) {
+                while (buf.length < 2) {
+                    if (!(await fill())) throw new HTTPError(400, "unexpected EOF");
+                }
+                if (buf.data[0] !== 13 || buf.data[1] !== 10) {
+                    throw new HTTPError(400, "bad chunk terminator");
+                }
+                bufPop(buf, 2);
+                needCRLF = false;
+            }
+
+            if (remain === 0) {
+                const line = (await readLine()).toString("latin1");
+                const sizeText = line.split(";", 1)[0]!.trim();
+                if (!/^[0-9A-Fa-f]+$/.test(sizeText)) throw new HTTPError(400, "bad chunk size");
+                remain = parseInt(sizeText, 16);
+
+                if (remain === 0) {
+                    // Ignore trailer fields, but consume them correctly.
+                    while ((await readLine()).length !== 0) { }
+                    ended = true;
+                    return Buffer.alloc(0);
+                }
+            }
+
+            if (buf.length === 0) {
+                if (!(await fill())) throw new HTTPError(400, "unexpected EOF");
+            }
+
+            const n = Math.min(buf.length, remain, 64 * 1024);
+            const out = Buffer.from(buf.data.subarray(0, n));
+            bufPop(buf, n);
+            remain -= n;
+            if (remain === 0) needCRLF = true;
+            return out;
+        },
+    };
+}
