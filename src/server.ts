@@ -485,3 +485,49 @@ async function readAll(reader: BodyReader, limit = 32 * 1024 * 1024): Promise<Bu
     }
     return Buffer.concat(parts);
 }
+
+function gzipFilter(source: BodyReader): BodyReader {
+    const input = new Readable({
+        read() { },
+    });
+    const gzip = zlib.createGzip({ flush: zlib.constants.Z_SYNC_FLUSH });
+    input.pipe(gzip);
+
+    let pumping = false;
+    let ended = false;
+
+    async function pump(): Promise<void> {
+        if (pumping) return;
+        pumping = true;
+        try {
+            const d = await source.read();
+            if (d.length === 0) {
+                ended = true;
+                input.push(null);
+            } else {
+                input.push(d);
+            }
+        } catch (e) {
+            input.destroy(e as Error);
+        } finally {
+            pumping = false;
+        }
+    }
+
+    const iter = gzip[Symbol.asyncIterator]();
+
+    return {
+        length: -1,
+        read: async () => {
+            if (!ended) await pump();
+            const r = await iter.next();
+            if (!r.done) return Buffer.from(r.value);
+            return Buffer.alloc(0);
+        },
+        close: async () => {
+            input.destroy();
+            gzip.destroy();
+            await source.close?.();
+        },
+    };
+}
