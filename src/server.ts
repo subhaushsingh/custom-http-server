@@ -167,3 +167,41 @@ function parseRequestLine(line: Buffer): [string, Buffer, string] {
 
     return [method, Buffer.from(uri, "latin1"), version];
 }
+
+function validateHeader(line: Buffer): boolean {
+    const idx = line.indexOf(":");
+    if (idx <= 0) return false;
+    const name = line.subarray(0, idx).toString("latin1");
+    if (!validateToken(name)) return false;
+    return !line.includes("\r") && !line.includes("\n");
+}
+
+function parseHTTPReq(data: Buffer): HTTPReq {
+    const lines = splitLines(data);
+    if (lines.length < 2 || lines[lines.length - 1]!.length !== 0) {
+        throw new HTTPError(400, "bad HTTP header");
+    }
+
+    const [method, uri, version] = parseRequestLine(lines[0]!);
+    const headers: Buffer[] = [];
+
+    for (let i = 1; i < lines.length - 1; i++) {
+        const h = Buffer.from(lines[i]!);
+        if (!validateHeader(h)) throw new HTTPError(400, "bad header field");
+        headers.push(h);
+    }
+
+    return { method, uri, version, headers };
+}
+
+function cutMessage(buf: DynBuf): HTTPReq | null {
+    const idx = buf.data.subarray(0, buf.length).indexOf("\r\n\r\n");
+    if (idx < 0) {
+        if (buf.length > 64 * 1024) throw new HTTPError(431, "header too large");
+        return null;
+    }
+
+    const msg = parseHTTPReq(Buffer.from(buf.data.subarray(0, idx + 4)));
+    bufPop(buf, idx + 4);
+    return msg;
+}
