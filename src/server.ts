@@ -397,3 +397,44 @@ function readerFromReq(conn: TCPConn, buf: DynBuf, req: HTTPReq): BodyReader {
 
     return readerFromMemory(Buffer.alloc(0));
 }
+
+const STATUS: Record<number, string> = {
+    101: "Switching Protocols",
+    200: "OK",
+    206: "Partial Content",
+    304: "Not Modified",
+    400: "Bad Request",
+    403: "Forbidden",
+    404: "Not Found",
+    405: "Method Not Allowed",
+    411: "Length Required",
+    416: "Range Not Satisfiable",
+    431: "Request Header Fields Too Large",
+    500: "Internal Server Error",
+    501: "Not Implemented",
+};
+
+function encodeHTTPResp(resp: HTTPRes): Buffer {
+    const reason = STATUS[resp.code] ?? "Unknown";
+    const lines = [
+        `HTTP/1.1 ${resp.code} ${reason}`,
+        "Server: build-your-own-ts",
+        ...resp.headers.map(h => h.toString("latin1")),
+        "",
+        "",
+    ];
+    return Buffer.from(lines.join("\r\n"), "latin1");
+}
+
+async function writeHTTPHeader(conn: TCPConn, resp: HTTPRes): Promise<void> {
+    if (resp.code !== 101 && resp.code !== 304) {
+        if (resp.body.length < 0) {
+            if (!fieldGet(resp.headers, "Transfer-Encoding")) {
+                resp.headers.push(Buffer.from("Transfer-Encoding: chunked"));
+            }
+        } else if (!fieldGet(resp.headers, "Content-Length")) {
+            resp.headers.push(Buffer.from(`Content-Length: ${resp.body.length}`));
+        }
+    }
+    await soWrite(conn, encodeHTTPResp(resp));
+}
