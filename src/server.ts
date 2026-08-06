@@ -857,3 +857,127 @@ async function createWSServer(input: BodyReader): Promise<[WSServer, BodyReader]
 
     return [ws, responseBody];
 }
+
+
+async function handleWS(
+    req: HTTPReq,
+    reqBody: BodyReader,
+    app: WSApplication,
+): Promise<HTTPRes> {
+    const key = fieldGet(req.headers, "Sec-WebSocket-Key");
+    if (!key) throw new HTTPError(400, "missing WebSocket key");
+
+    const [ws, resBody] = await createWSServer(reqBody);
+
+    app(ws)
+        .catch(err => console.error("WebSocket app error:", err))
+        .finally(() => ws.close());
+
+    return {
+        code: 101,
+        headers: [
+            Buffer.from("Upgrade: websocket"),
+            Buffer.from("Connection: Upgrade"),
+            Buffer.from(`Sec-WebSocket-Accept: ${wsKeyAccept(key)}`),
+        ],
+        body: resBody,
+    };
+}
+
+/* ------------------------------- Main loop -------------------------------- */
+
+function errorResponse(err: unknown): HTTPRes {
+    const code = err instanceof HTTPError ? err.code : 500;
+    const message = err instanceof Error ? err.message : "internal error";
+    return {
+        code,
+        headers: [Buffer.from("Content-Type: text/plain; charset=utf-8")],
+        body: readerFromMemory(Buffer.from(`${code} ${STATUS[code] ?? "Error"}\n${message}\n`)),
+    };
+}
+
+async function serveClient(socket: net.Socket): Promise<void> {
+    const conn = soInit(socket);
+    const buf: DynBuf = { data: Buffer.alloc(0), length: 0 };
+
+    while (true) {
+        let msg: HTTPReq | null = null;
+
+        try {
+            while (!msg) {
+                msg = cutMessage(buf);
+                if (msg) break;
+
+                const data = await soRead(conn);
+                if (data.length === 0) return;
+                bufPush(buf, data);
+            }
+
+            const wsapp = getWSApp(msg);
+            let reqBody: BodyReader;
+            let res: HTTPRes;
+
+            if (wsapp) {
+                reqBody = readerFromConnEOF(conn, buf);
+                res = await handleWS(msg, reqBody, wsapp);
+            } else {
+                reqBody = readerFromReq(conn, buf, msg);
+                res = await handleReq(msg, reqBody);
+            }
+
+            try {
+                if (!wsapp) enableCompression(msg, res);
+
+                await writeHTTPHeader(conn, res);
+
+                if (msg.method !== "HEAD") {
+                    await writeHTTPBody(conn, res.body, !!wsapp);
+                }
+            } finally {
+                await res.body.close?.();
+            }
+
+            if (wsapp || msg.version === "1.0" || hasToken(msg.headers, "Connection", "close")) {
+                return;
+            }
+
+            // A handler may intentionally ignore the request body.
+            while ((await reqBody.read()).length > 0) { }
+        } catch (err) {
+            console.error("request error:", err);
+            try {
+                const res = errorResponse(err);
+                res.headers.push(Buffer.from("Connection: close"));
+                await writeHTTPHeader(conn, res);
+                await writeHTTPBody(conn, res.body);
+                await res.body.close?.();
+            } catch { }
+            return;
+        }
+    }
+}
+
+async function newConn(socket: net.Socket): Promise<void> {
+    console.log("new connection", socket.remoteAddress, socket.remotePort);
+    try {
+        await serveClient(socket);
+    } catch (err) {
+        console.error("connection exception:", err);
+    } finally {
+        socket.destroy();
+    }
+}
+
+const server = net.createServer({ pauseOnConnect: true });
+
+server.on("connection", socket => {
+    void newConn(socket);
+});
+
+server.on("error", err => {
+    console.error("server error:", err);
+});
+
+server.listen({ host: "127.0.0.1", port: 1234 }, () => {
+    console.log("listening on http://127.0.0.1:1234");
+});
