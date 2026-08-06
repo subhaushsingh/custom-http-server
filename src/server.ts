@@ -205,3 +205,37 @@ function cutMessage(buf: DynBuf): HTTPReq | null {
     bufPop(buf, idx + 4);
     return msg;
 }
+
+function fieldGet(headers: Buffer[], name: string): Buffer | null {
+    const lower = name.toLowerCase();
+    for (const h of headers) {
+        const idx = h.indexOf(":");
+        if (idx < 0) continue;
+        if (h.subarray(0, idx).toString("latin1").trim().toLowerCase() === lower) {
+            return Buffer.from(h.subarray(idx + 1).toString("latin1").trim(), "latin1");
+        }
+    }
+    return null;
+}
+
+function fieldGetList(headers: Buffer[], name: string): string[] {
+    const lower = name.toLowerCase();
+    const out: string[] = [];
+    for (const h of headers) {
+        const idx = h.indexOf(":");
+        if (idx < 0) continue;
+        if (h.subarray(0, idx).toString("latin1").trim().toLowerCase() === lower) {
+            for (const x of h.subarray(idx + 1).toString("latin1").split(",")) {
+                const v = x.trim().toLowerCase();
+                if (v) out.push(v);
+            }
+        }
+    }
+    return out;
+}
+
+function hasToken(headers: Buffer[], name: string, token: string): boolean {
+    return fieldGetList(headers, name).some(
+        x => x.split(";")[0]!.trim() === token.toLowerCase()
+    );
+}
