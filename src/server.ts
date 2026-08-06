@@ -616,170 +616,66 @@ function mimeType(p: string): string {
     } as Record<string, string>)[ext] ?? "application/octet-stream";
 }
 
-function mimeType(p: string): string {
-    const ext = path.extname(p).toLowerCase();
-    return ({
-        ".html": "text/html; charset=utf-8",
-        ".css": "text/css; charset=utf-8",
-        ".js": "text/javascript; charset=utf-8",
-        ".json": "application/json",
-        ".txt": "text/plain; charset=utf-8",
-        ".png": "image/png",
-        ".jpg": "image/jpeg",
-        ".jpeg": "image/jpeg",
-        ".gif": "image/gif",
-        ".svg": "image/svg+xml",
-        ".pdf": "application/pdf",
-    } as Record<string, string>)[ext] ?? "application/octet-stream";
+function wsKeyAccept(key: Buffer): string {
+    return crypto
+        .createHash("sha1")
+        .update(key)
+        .update("258EAFA5-E914-47DA-95CA-C5AB0DC85B11")
+        .digest("base64");
 }
 
-async function serveStatic(req: HTTPReq, urlPath: string): Promise<HTTPRes> {
-    const root = path.resolve(process.cwd(), "www");
-    let decoded: string;
-    try {
-        decoded = decodeURIComponent(urlPath);
-    } catch {
-        throw new HTTPError(400, "bad URI");
-    }
+function getWSApp(req: HTTPReq): WSApplication | null {
+    const uri = req.uri.toString("latin1").split("?")[0];
+    if (uri !== "/ws") return null;
+    if (req.method !== "GET" || req.version !== "1.1") return null;
+    if (!hasToken(req.headers, "Upgrade", "websocket")) return null;
+    if (!hasToken(req.headers, "Connection", "upgrade")) return null;
+    if (!fieldGet(req.headers, "Sec-WebSocket-Key")) return null;
+    if (fieldGet(req.headers, "Sec-WebSocket-Version")?.toString("latin1") !== "13") return null;
 
-    if (decoded === "/") decoded = "/index.html";
-    const rel = decoded.replace(/^\/+/, "");
-    const full = path.resolve(root, rel);
+    return async (ws: WSServer) => {
+        while (true) {
+            const msg = await ws.recv();
+            if (!msg) return;
 
-    if (full !== root && !full.startsWith(root + path.sep)) {
-        throw new HTTPError(403, "forbidden");
-    }
+            const data = await readAll({
+                length: msg.length,
+                read: msg.read,
+            });
 
-    let handle: fs.FileHandle;
-    try {
-        handle = await fs.open(full, "r");
-    } catch {
-        throw new HTTPError(404, "not found");
-    }
-
-    try {
-        const st = await handle.stat();
-        if (!st.isFile()) throw new HTTPError(404, "not found");
-
-        const mtimeSec = Math.floor(st.mtimeMs / 1000) * 1000;
-        const lastModified = new Date(mtimeSec).toUTCString();
-
-        const ims = fieldGet(req.headers, "If-Modified-Since");
-        if (ims) {
-            const t = Date.parse(ims.toString("latin1"));
-            if (!Number.isNaN(t) && mtimeSec <= t) {
-                await handle.close();
-                return {
-                    code: 304,
-                    headers: [Buffer.from(`Last-Modified: ${lastModified}`)],
-                    body: readerFromMemory(Buffer.alloc(0)),
-                };
-            }
-        }
-
-        const headers = [
-            Buffer.from(`Content-Type: ${mimeType(full)}`),
-            Buffer.from("Accept-Ranges: bytes"),
-            Buffer.from(`Last-Modified: ${lastModified}`),
-        ];
-
-        const rangeHeader = fieldGet(req.headers, "Range");
-        if (rangeHeader) {
-            const ifRange = fieldGet(req.headers, "If-Range");
-            const mayRange = !ifRange || ifRange.toString("latin1") === lastModified;
-
-            if (mayRange) {
-                const range = parseSingleRange(rangeHeader.toString("latin1"), st.size);
-                if (!range) {
-                    await handle.close();
-                    return {
-                        code: 416,
-                        headers: [Buffer.from(`Content-Range: bytes */${st.size}`)],
-                        body: readerFromMemory(Buffer.alloc(0)),
+            await ws.send({
+                type: msg.type,
+                length: data.length,
+                read: (() => {
+                    let done = false;
+                    return async () => {
+                        if (done) return Buffer.alloc(0);
+                        done = true;
+                        return data;
                     };
-                }
-                const [start, end] = range;
-                headers.push(Buffer.from(`Content-Range: bytes ${start}-${end}/${st.size}`));
-                return {
-                    code: 206,
-                    headers,
-                    body: fileReader(handle, start, end - start + 1),
-                };
-            }
+                })(),
+            });
         }
-
-        return {
-            code: 200,
-            headers,
-            body: fileReader(handle, 0, st.size),
-        };
-    } catch (e) {
-        try { await handle.close(); } catch { }
-        throw e;
-    }
-}
-
-/* ------------------------------ HTTP handler ------------------------------ */
-
-async function* sheepGenerator(): AsyncGenerator<Buffer, void, void> {
-    for (let i = 0; i < 100; i++) {
-        yield Buffer.from(`${i} sheep...\n`);
-        await new Promise(resolve => setTimeout(resolve, 50));
-    }
-}
-
-async function handleReq(req: HTTPReq, body: BodyReader): Promise<HTTPRes> {
-    if (!["GET", "HEAD", "POST"].includes(req.method)) {
-        return {
-            code: 405,
-            headers: [Buffer.from("Allow: GET, HEAD, POST")],
-            body: readerFromMemory(Buffer.from("Method Not Allowed\n")),
-        };
-    }
-
-    const rawUri = req.uri.toString("latin1");
-    let url: URL;
-    try {
-        url = new URL(rawUri, "http://localhost");
-    } catch {
-        throw new HTTPError(400, "bad URI");
-    }
-
-    if (url.pathname === "/echo") {
-        return {
-            code: 200,
-            headers: [Buffer.from("Content-Type: application/octet-stream")],
-            body,
-        };
-    }
-
-    if (url.pathname === "/sheep") {
-        return {
-            code: 200,
-            headers: [Buffer.from("Content-Type: text/plain; charset=utf-8")],
-            body: readerFromGenerator(sheepGenerator()),
-        };
-    }
-
-    if (url.pathname === "/") {
-        const hello = Buffer.from(
-            "Hello from your web server built from scratch.\n" +
-            "Try /echo, /sheep, /files/<name>, or WebSocket /ws.\n"
-        );
-        return {
-            code: 200,
-            headers: [Buffer.from("Content-Type: text/plain; charset=utf-8")],
-            body: readerFromMemory(hello),
-        };
-    }
-
-    if (url.pathname.startsWith("/files/")) {
-        return await serveStatic(req, url.pathname.substring("/files".length));
-    }
-
-    return {
-        code: 404,
-        headers: [Buffer.from("Content-Type: text/plain; charset=utf-8")],
-        body: readerFromMemory(Buffer.from("Not Found\n")),
     };
+}
+
+function wsFrame(opcode: number, payload: Buffer, fin = true): Buffer {
+    const first = (fin ? 0x80 : 0) | opcode;
+    let head: Buffer;
+
+    if (payload.length < 126) {
+        head = Buffer.from([first, payload.length]);
+    } else if (payload.length <= 0xffff) {
+        head = Buffer.alloc(4);
+        head[0] = first;
+        head[1] = 126;
+        head.writeUInt16BE(payload.length, 2);
+    } else {
+        head = Buffer.alloc(10);
+        head[0] = first;
+        head[1] = 127;
+        head.writeBigUInt64BE(BigInt(payload.length), 2);
+    }
+
+    return Buffer.concat([head, payload]);
 }
