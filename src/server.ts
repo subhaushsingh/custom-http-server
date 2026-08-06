@@ -438,3 +438,50 @@ async function writeHTTPHeader(conn: TCPConn, resp: HTTPRes): Promise<void> {
     }
     await soWrite(conn, encodeHTTPResp(resp));
 }
+
+async function writeHTTPBody(conn: TCPConn, body: BodyReader, raw = false): Promise<void> {
+    if (raw) {
+        while (true) {
+            const data = await body.read();
+            if (data.length === 0) return;
+            await soWrite(conn, data);
+        }
+    }
+
+    if (body.length >= 0) {
+        while (true) {
+            const data = await body.read();
+            if (data.length === 0) return;
+            await soWrite(conn, data);
+        }
+    }
+
+    const crlf = Buffer.from("\r\n");
+    while (true) {
+        const data = await body.read();
+        if (data.length === 0) {
+            await soWrite(conn, Buffer.from("0\r\n\r\n"));
+            return;
+        }
+        await soWrite(conn, Buffer.concat([
+            Buffer.from(data.length.toString(16)),
+            crlf,
+            data,
+            crlf,
+        ]));
+    }
+}
+
+
+async function readAll(reader: BodyReader, limit = 32 * 1024 * 1024): Promise<Buffer> {
+    const parts: Buffer[] = [];
+    let total = 0;
+    while (true) {
+        const d = await reader.read();
+        if (d.length === 0) break;
+        total += d.length;
+        if (total > limit) throw new HTTPError(400, "body too large");
+        parts.push(d);
+    }
+    return Buffer.concat(parts);
+}
