@@ -287,3 +287,18 @@ function readerFromConnLength(conn: TCPConn, buf: DynBuf, length: number): BodyR
         },
     };
 }
+
+
+function readerFromConnEOF(conn: TCPConn, buf: DynBuf): BodyReader {
+    return {
+        length: -1,
+        read: async () => {
+            if (buf.length > 0) {
+                const data = Buffer.from(buf.data.subarray(0, buf.length));
+                bufPop(buf, buf.length);
+                return data;
+            }
+            return await soRead(conn);
+        },
+    };
+}
