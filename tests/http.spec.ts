@@ -30,7 +30,7 @@ test.describe("basic routes", () => {
 test.describe("/echo", () => {
     test("echoes the request body back exactly", async ({ request }) => {
         const payload = "the quick brown fox";
-        const res = await request.get("/echo", { data: payload });
+        const res = await request.post("/echo", { data: payload });
         expect(res.status()).toBe(200);
         expect(await res.text()).toBe(payload);
     });

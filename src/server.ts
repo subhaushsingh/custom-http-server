@@ -742,6 +742,9 @@ async function handleReq(req: HTTPReq, body: BodyReader): Promise<HTTPRes> {
     }
 
     if (url.pathname === "/echo") {
+        if (req.method !== "POST") {
+            throw new HTTPError(405, "Method Not Allowed");
+        }
         return {
             code: 200,
             headers: [Buffer.from("Content-Type: application/octet-stream")],
