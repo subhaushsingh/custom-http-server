@@ -36,7 +36,7 @@ test.describe("/echo", () => {
     });
 
     test("handles an empty body", async ({ request }) => {
-        const res = await request.get("/echo");
+        const res = await request.post("/echo");
         expect(res.status()).toBe(200);
         expect(await res.text()).toBe("");
     });
