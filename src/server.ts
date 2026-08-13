@@ -430,6 +430,9 @@ function encodeHTTPResp(resp: HTTPRes): Buffer {
 }
 
 async function writeHTTPHeader(conn: TCPConn, resp: HTTPRes): Promise<void> {
+    if (!fieldGet(resp.headers, "Access-Control-Allow-Origin")) {
+        resp.headers.push(Buffer.from("Access-Control-Allow-Origin: *"));
+    }
     if (resp.code !== 101 && resp.code !== 304) {
         if (resp.body.length < 0) {
             if (!fieldGet(resp.headers, "Transfer-Encoding")) {
@@ -711,6 +714,17 @@ async function* sheepGenerator(): AsyncGenerator<Buffer, void, void> {
 }
 
 async function handleReq(req: HTTPReq, body: BodyReader): Promise<HTTPRes> {
+    if (req.method === "OPTIONS") {
+        return {
+            code: 204, // 204 No Content
+            headers: [
+                Buffer.from("Access-Control-Allow-Origin: *"),
+                Buffer.from("Access-Control-Allow-Methods: GET, HEAD, POST, OPTIONS"),
+                Buffer.from("Access-Control-Allow-Headers: *")
+            ],
+            body: readerFromMemory(Buffer.alloc(0)),
+        };
+    }
     if (!["GET", "HEAD", "POST"].includes(req.method)) {
         return {
             code: 405,
@@ -1181,9 +1195,14 @@ async function serveClient(socket: net.Socket): Promise<void> {
                 return;
             }
 
-            // A handler may intentionally ignore the request body.
             while ((await reqBody.read()).length > 0) { }
-        } catch (err) {
+            
+        } catch (err: any) {
+            if (err.message === "socket closed" || err.code === "ECONNRESET") {
+
+                return; 
+            }
+
             console.error("request error:", err);
             try {
                 const res = errorResponse(err);
